@@ -9,8 +9,17 @@ from scipy.signal import wiener
 import numpy as np
 
 INPUT_DIR = "data/input/"
+# INPUT_DIR = "data/input1/"
+# INPUT_DIR = "data/input2/"
 OUTPUT_DIR = "data/output/"
 ALIGNED_IMAGES_DIR = "data/aligned_images/"
+MASKS_IMAGES_DIR = "data/masks/"
+
+
+def save_image(image, filename, output_dir=OUTPUT_DIR):
+    filepath = os.path.join(output_dir, filename)
+    cv2.imwrite(filepath, image)
+    print(f"Image saved to {filepath}")
 
 
 def unsharp_mask(image, sigma=1.0, strength=1.5):
@@ -67,6 +76,52 @@ def crop_black_border(image):
     return image[y : y + h, x : x + w]
 
 
+def create_difference_mask(reference, image, threshold=20):
+    """Create a mask based on the difference between the reference and the input image."""
+    difference = cv2.absdiff(reference, image)
+    _, mask = cv2.threshold(difference, threshold, 255, cv2.THRESH_BINARY_INV)
+    return mask.astype(np.uint8)
+
+
+def selective_stack(images, best_image):
+    """Stack images selectively, only including consistent parts."""
+    height, width = best_image.shape[:2]
+    stacked = np.zeros(
+        (height, width), dtype=np.uint8
+    )  # Only 2 dimensions as it's grayscale
+
+    for idx, img in enumerate(images):
+        # Make all the images black and white
+        if len(img.shape) == 3:
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+        # Create a mask of the differences
+        mask = create_difference_mask(best_image, img)
+
+        processed_mask = process_mask(mask)
+
+        # save mask with index of image
+        save_image(processed_mask, f"mask_{idx}.jpg", MASKS_IMAGES_DIR)
+
+        # Ensure the mask is of the right datatype
+        mask = mask.astype(np.uint8)
+
+        # Print shapes for debugging
+        print("Image shape:", img.shape)
+        print("Mask shape:", mask.shape)
+
+        # Apply the mask
+        masked_image = cv2.bitwise_and(img, img, mask=mask)
+
+        # Add to the stacked image
+        stacked = cv2.add(stacked, masked_image)
+
+    # Average the stacked images
+    stacked = (stacked / len(images)).astype(np.uint8)
+
+    return stacked
+
+
 def create_mask(original, processed, threshold=30):
     print(">> Creating mask...")
     # Calculate absolute difference between images
@@ -83,17 +138,53 @@ def create_mask(original, processed, threshold=30):
 
 
 def apply_mask(original, processed, mask):
-    # Invert the mask
-    mask_inv = cv2.bitwise_not(mask)
+    # Normalize mask to range 0.0 - 1.0
+    mask = mask.astype(float) / 255
 
-    # Bitwise-and the images with the mask and its inverse
-    orig_masked = cv2.bitwise_and(original, original, mask=mask)
-    proc_masked = cv2.bitwise_and(processed, processed, mask=mask_inv)
+    # Expand dimensions of the mask to match the number of color channels in the image
+    mask = np.expand_dims(mask, axis=-1)
+
+    # Convert image data types for proper computation
+    original = original.astype(float)
+    processed = processed.astype(float)
+
+    # Create a weighted image by multiplying with the mask and its inverse
+    orig_masked = original * mask
+    proc_masked = processed * (1.0 - mask)
 
     # Combine the masked images
-    combined = cv2.add(orig_masked, proc_masked)
+    combined = orig_masked + proc_masked
+
+    # Make sure all pixel intensities are within the range 0-255
+    combined = np.clip(combined, 0, 255).astype("uint8")
 
     return combined
+
+
+def process_mask(mask, kernel_size=6, blur_size=9, dilation_size=7):
+    # Create the kernel for morphological operations
+    kernel = np.ones((kernel_size, kernel_size), np.uint8)
+
+    # Remove small black spots (erosion followed by dilation: closing)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+
+    # Remove small white spots (dilation followed by erosion: opening)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+
+    # Invert the mask to expand the black regions
+    inverted_mask = cv2.bitwise_not(mask)
+
+    # Increase size of the black objects
+    dilation_kernel = np.ones((dilation_size, dilation_size), np.uint8)
+    inverted_mask = cv2.dilate(inverted_mask, dilation_kernel, iterations=1)
+
+    # Invert the mask back to its original form
+    mask = cv2.bitwise_not(inverted_mask)
+
+    # Blur the edges
+    mask = cv2.GaussianBlur(mask, (blur_size, blur_size), 0)
+
+    return mask
 
 
 def main():
@@ -105,62 +196,57 @@ def main():
     preprocessed_images = preprocess_images(images)
 
     # Determine the best image (least blurry) to use as the main image
-    main_image = select_best_image(preprocessed_images)
-    cv2.imwrite(os.path.join(OUTPUT_DIR, "3_main_image.jpg"), main_image)
+    best_image = select_best_image(preprocessed_images)
+    save_image(best_image, "3_best_image.jpg")
 
-    # Create new list of images with the main image repeated 5 times and the rest of the images
-    new_images = [main_image] * 5 + [
-        image
-        for image in preprocessed_images
-        if not np.array_equal(image, main_image)
-    ]
+    # Create new list of images with the main image repeated some times and the rest of the images (should not be more than half of the total images)
+    BEST_IMAGE_REPETITIONS = 1
+    new_images = [best_image] * BEST_IMAGE_REPETITIONS + preprocessed_images
 
     # Align images
-    aligned_images = align_images(preprocessed_images)
-
-    # Print shapes of aligned images
-    for i, img in enumerate(aligned_images):
-        print(f"Shape of aligned image {i}: {img.shape}")
+    aligned_images = align_images(new_images)
 
     # Save all aligned images
-    if not os.path.exists(ALIGNED_IMAGES_DIR):
-        os.makedirs(ALIGNED_IMAGES_DIR)
     for i, img in enumerate(aligned_images):
-        cv2.imwrite(
-            os.path.join(ALIGNED_IMAGES_DIR, f"aligned_image_{i}.jpg"), img
-        )
+        save_image(img, f"aligned_image_{i}.jpg", ALIGNED_IMAGES_DIR)
+
+    # test_image = selective_stack(aligned_images, best_image)
+    # save_image(test_image, "test_image.jpg")
 
     # Blend images
     blended_image = median_blend(aligned_images)
-    cv2.imwrite(os.path.join(OUTPUT_DIR, "4_blended_image.jpg"), blended_image)
+    save_image(blended_image, "4_blended_image.jpg")
 
     deblured_image = deblur_image(blended_image)
-    cv2.imwrite(
-        os.path.join(OUTPUT_DIR, "5_deblured_image.jpg"), deblured_image
-    )
+    save_image(deblured_image, "5_deblured_image.jpg")
 
     sharped_image = unsharp_mask(deblured_image)
-    cv2.imwrite(os.path.join(OUTPUT_DIR, "6_sharped_image.jpg"), sharped_image)
+    save_image(sharped_image, "6_sharped_image.jpg")
 
     # Crop the image
     cropped_image = crop_black_border(sharped_image)
-    cv2.imwrite(os.path.join(OUTPUT_DIR, "7_croped_image.jpg"), cropped_image)
+    save_image(cropped_image, "7_croped_image.jpg")
 
     # Align images
-    aligned_for_mask = align_images([main_image, cropped_image])
+    aligned_for_mask = align_images([best_image, cropped_image])
 
-    MASK_THRESHOLD = 20
+    MASK_THRESHOLD = 5  # maybe 5 - 30 are good values
     # Create mask using the original best image and the sharpened image
     mask = create_mask(
         aligned_for_mask[0], aligned_for_mask[1], MASK_THRESHOLD
     )
-    cv2.imwrite(os.path.join(OUTPUT_DIR, "8_mask.jpg"), mask)
+    save_image(mask, "8_mask.jpg")
+
+    processed_mask = process_mask(mask)
+    save_image(processed_mask, "9_processed_mask.jpg")
 
     # Apply the mask to the images
-    final_image = apply_mask(aligned_for_mask[0], aligned_for_mask[1], mask)
+    final_image = apply_mask(
+        aligned_for_mask[0], aligned_for_mask[1], processed_mask
+    )
 
     # Write the final output image
-    cv2.imwrite(os.path.join(OUTPUT_DIR, "9_final_image.jpg"), final_image)
+    save_image(final_image, "10_final_image.jpg")
 
 
 if __name__ == "__main__":

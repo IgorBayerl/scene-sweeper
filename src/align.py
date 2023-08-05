@@ -2,7 +2,7 @@ import cv2
 import numpy as np
 
 
-def align_images2(images):
+def align_images6(images):
     print(">> Aligning images...")
     # Initialize the ORB detector
     orb = cv2.ORB_create()
@@ -60,7 +60,7 @@ def align_images2(images):
     return aligned_images
 
 
-def align_images3(images):
+def align_images333(images):
     print(">> Aligning images...")
     # Initialize the SIFT detector
     sift = cv2.xfeatures2d.SIFT_create()
@@ -119,7 +119,7 @@ def align_images3(images):
     return aligned_images
 
 
-def align_images4(images):
+def align_images2(images):
     print(">> Aligning images...")
     # Initialize the SIFT detector
     sift = cv2.xfeatures2d.SIFT_create()
